@@ -2,31 +2,41 @@ name: Deploy HOJ Frontend
 
 on:
   push:
-    branches: [ main ]  # Runs only when pushing to main branch
+    branches: [ main ]
+  workflow_dispatch:  # Allows manual triggering
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment: production  # Optional: creates deployment environment
     
     steps:
-      # Checkout code
       - uses: actions/checkout@v4
       
-      # Setup Node.js
+      # Setup Node.js (required for Vue build)
       - uses: actions/setup-node@v3
         with:
-          node-version: 18
+          node-version: '18'
+          cache: 'npm'
       
-      # Install and build (assuming HOJ frontend is in hoj-vue/)
-      - name: Build frontend
+      # Install dependencies and build
+      - name: Build HOJ Frontend
         run: |
           cd hoj-vue
-          npm install
-          npm run build
+          npm ci           # Clean install
+          npm run build    # Build production assets
+          ls -R dist       # Verify built files
           
       # Deploy to GitHub Pages
       - uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: hoj-vue/dist  # Path to built files
-          keep_files: true  # Keep existing files in gh-pages branch
+          publish_dir: hoj-vue/dist
+          destination_dir: .  # Publish to root of gh-pages
+          keep_files: false   # Clean old files
+          
+      # Verify deployment (optional)
+      - name: Check Deployment
+        run: |
+          echo "View your site at:"
+          echo "https://${{ github.repository_owner }}.github.io/oj/"
