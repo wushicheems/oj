@@ -1,22 +1,32 @@
 name: Deploy HOJ Frontend
-on: [push]  # 触发条件：每次推送到 main 分支时运行
+
+on:
+  push:
+    branches: [ main ]  # Runs only when pushing to main branch
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    
     steps:
-      # 1. 拉取代码
+      # Checkout code
       - uses: actions/checkout@v4
       
-      # 2. 构建前端（假设是 Vue 项目）
-      - name: Build HOJ Vue
+      # Setup Node.js
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 18
+      
+      # Install and build (assuming HOJ frontend is in hoj-vue/)
+      - name: Build frontend
         run: |
           cd hoj-vue
           npm install
           npm run build
-          mv dist ../public  # 将构建结果移动到 public 文件夹
-      
-      # 3. 部署到 GitHub Pages
+          
+      # Deploy to GitHub Pages
       - uses: peaceiris/actions-gh-pages@v3
         with:
-          publish_dir: ./public  # 发布 public 目录
-          github_token: ${{ secrets.GITHUB_TOKEN }}  # 自动使用 GitHub 令牌
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: hoj-vue/dist  # Path to built files
+          keep_files: true  # Keep existing files in gh-pages branch
