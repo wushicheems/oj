@@ -28,7 +28,7 @@ jobs:
           CODESPACE_PAT: ${{ secrets.CODESPACE_PAT }}
         run: |
           if [ -z "$CODESPACE_PAT" ]; then
-            echo 'CODESPACE_PAT secret is not set. Please add a PAT with `codespaces` scope to repository secrets as `CODESPACE_PAT`.'
+            echo "CODESPACE_PAT secret is not set. Please add a PAT with 'codespaces' scope to repository secrets as CODESPACE_PAT."
             exit 1
           fi
           echo "$CODESPACE_PAT" | gh auth login --with-token
@@ -49,7 +49,8 @@ jobs:
 
       - name: Install debug deps
         run: |
-          sudo apt-get update && sudo apt-get install -y jq || true
+          sudo apt-get update || true
+          sudo apt-get install -y jq || true
 
       - name: Make port 80 public (gh api)
         env:
@@ -80,17 +81,51 @@ jobs:
           fi
 
           echo "Setting port 80 visibility to public for codespace: $CODESPACE_NAME"
+
+          # Try gh api with retries
           set +e
-          gh api -X PATCH /user/codespaces/$CODESPACE_NAME/ports/80 -f visibility=public > /tmp/ghresp.json 2>&1
-          RC=$?
-          set -e
-          echo "gh api exit code: $RC"
-          echo "Response:"; cat /tmp/ghresp.json || true
-          if [ $RC -ne 0 ]; then
-            echo "gh api failed; see response above." >&2
-            exit $RC
+          MAX_TRIES=3
+          TRIED=0
+          GH_OK=1
+          while [ $TRIED -lt $MAX_TRIES ]; do
+            TRIED=$((TRIED+1))
+            echo "Attempt $TRIED: gh api PATCH..."
+            gh api -X PATCH /user/codespaces/"$CODESPACE_NAME"/ports/80 -f visibility=public > /tmp/ghresp.json 2>&1
+            RC=$?
+            echo "gh api exit code: $RC"
+            if [ $RC -eq 0 ]; then
+              GH_OK=0
+              break
+            fi
+            echo "gh api attempt $TRIED failed; response:"; cat /tmp/ghresp.json || true
+            sleep $((TRIED*2))
+          done
+
+          if [ $GH_OK -eq 0 ]; then
+            echo "gh api succeeded on attempt $TRIED.";
+            echo "Response:"; cat /tmp/ghresp.json || true
+            set -e
+            exit 0
           fi
-          echo "Port visibility set to public."
+
+          # Fallback to curl if gh api consistently fails
+          echo "gh api failed after $MAX_TRIES attempts; falling back to curl..."
+          CURL_URL="https://api.github.com/user/codespaces/$CODESPACE_NAME/ports/80"
+          # Do not print token
+          HTTP_STATUS=$(curl -s -o /tmp/curlresp.json -w "%{http_code}" -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: token $CODESPACE_PAT" \
+            -H "Content-Type: application/json" \
+            "$CURL_URL" -d '{"visibility":"public"}' || echo "000")
+          echo "curl HTTP status: $HTTP_STATUS"
+          echo "curl response body:"; cat /tmp/curlresp.json || true
+          set -e
+          if echo "$HTTP_STATUS" | grep -qE '^2'; then
+            echo "Port visibility set to public via curl."
+          else
+            echo "Failed to set port visibility via curl (HTTP $HTTP_STATUS)." >&2
+            exit 1
+          fi
 
       - name: Done
         run: echo "Wake attempt finished"
