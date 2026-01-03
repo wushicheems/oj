@@ -43,37 +43,46 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y jq || true
 
-      - name: Make port 80 public (debug)
+      - name: Make port 80 public (gh api)
         env:
           CODESPACE_PAT: ${{ secrets.CODESPACE_PAT }}
         run: |
           set -euxo pipefail
           REPO=${{ github.repository }}
           echo "Repository: $REPO"
-          echo "gh version:"; gh --version || true
-          echo "Attempting gh auth login with provided PAT (masked)..."
+
           if [ -z "$CODESPACE_PAT" ]; then
-            echo 'CODESPACE_PAT is empty; ensure repository secret is set.'
-          else
-            echo "$CODESPACE_PAT" | gh auth login --with-token || true
+            echo "ERROR: CODESPACE_PAT secret is not set or not available in this run." >&2
+            echo "Please add a PAT with 'codespaces' scope as the repository secret 'CODESPACE_PAT'." >&2
+            exit 1
           fi
-          echo "gh auth status:"; gh auth status || true
+
+          echo "Logging into gh using provided PAT (token will not be printed)."
+          echo "$CODESPACE_PAT" | gh auth login --with-token
+
+          echo "gh auth status:"; gh auth status
+
           CODESPACE_NAME=$(gh codespace list --repo "$REPO" --json name --jq '.[0].name' || echo "")
           echo "CODESPACE_NAME=$CODESPACE_NAME"
 
           if [ -z "$CODESPACE_NAME" ]; then
-            echo "No codespace found for $REPO; skipping port visibility update."
-          else
-            echo "Setting port 80 visibility to public for codespace: $CODESPACE_NAME"
-            HTTP_STATUS=$(curl -s -o /tmp/resp.json -w "%{http_code}" -X PATCH \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: token $CODESPACE_PAT" \
-              -H "Content-Type: application/json" \
-              "https://api.github.com/user/codespaces/$CODESPACE_NAME/ports/80" \
-              -d '{"visibility":"public"}' || true)
-            echo "HTTP status: $HTTP_STATUS"
-            echo "Response body:"; cat /tmp/resp.json || true
+            echo "ERROR: No codespace found for $REPO; cannot set port visibility." >&2
+            gh codespace list --repo "$REPO" --json name || true
+            exit 1
           fi
+
+          echo "Setting port 80 visibility to public for codespace: $CODESPACE_NAME"
+          set +e
+          gh api -X PATCH /user/codespaces/$CODESPACE_NAME/ports/80 -f visibility=public > /tmp/ghresp.json 2>&1
+          RC=$?
+          set -e
+          echo "gh api exit code: $RC"
+          echo "Response:"; cat /tmp/ghresp.json || true
+          if [ $RC -ne 0 ]; then
+            echo "gh api failed; see response above." >&2
+            exit $RC
+          fi
+          echo "Port visibility set to public."
 
       - name: Done
         run: echo "Wake attempt finished"
