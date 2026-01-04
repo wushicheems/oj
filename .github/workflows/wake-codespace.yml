@@ -2,8 +2,8 @@ name: Wake Codespace
 
 on:
   schedule:
-    # every 30 minutes
-    - cron: '*/28 * * * *'
+    # every 15 minutes
+    - cron: '*/15 * * * *'
   workflow_dispatch: {}
 
 jobs:
@@ -16,29 +16,29 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y ca-certificates curl gnupg lsb-release
+          sudo apt-get install -y ca-certificates curl jq gnupg lsb-release || true
           curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
           sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
           sudo apt-get update
-          sudo apt-get install -y gh
+          sudo apt-get install -y gh || true
 
       - name: Authenticate with PAT
         env:
           CODESPACE_PAT: ${{ secrets.CODESPACE_PAT }}
         run: |
           if [ -z "$CODESPACE_PAT" ]; then
-            echo "CODESPACE_PAT secret is not set. Please add a PAT with 'codespaces' scope to repository secrets as CODESPACE_PAT."
+            echo "CODESPACE_PAT secret is not set. Please add a PAT with 'codespaces' scope to repository secrets as 'CODESPACE_PAT'."
             exit 1
           fi
           echo "$CODESPACE_PAT" | gh auth login --with-token
 
       - name: Find and start/create codespace
         run: |
+          set -euxo pipefail
           # shellcheck disable=SC2296,SC1083
           REPO=${{ github.repository }}
           echo "Repository: $REPO"
-          # try to find an existing codespace for this repo
           CODESPACE_NAME=$(gh codespace list --repo "$REPO" --json name --jq '.[0].name' || echo "")
           if [ -n "$CODESPACE_NAME" ]; then
             echo "Starting codespace: $CODESPACE_NAME"
@@ -48,51 +48,33 @@ jobs:
             gh codespace create --repo "$REPO" --branch "master" || echo "create failed or not permitted"
           fi
 
-      - name: Install debug deps
-        run: |
-          sudo apt-get update || true
-          sudo apt-get install -y jq || true
-
-      - name: Make port 80 public (gh api)
+      - name: Make port 80 public
         env:
           CODESPACE_PAT: ${{ secrets.CODESPACE_PAT }}
         run: |
           set -euxo pipefail
           # shellcheck disable=SC2296,SC1083
           REPO=${{ github.repository }}
-          echo "Repository: $REPO"
 
           if [ -z "$CODESPACE_PAT" ]; then
-            echo "ERROR: CODESPACE_PAT secret is not set or not available in this run." >&2
-            echo "Please add a PAT with 'codespaces' scope as the repository secret 'CODESPACE_PAT'." >&2
+            echo "ERROR: CODESPACE_PAT is not set; cannot set port visibility" >&2
             exit 1
           fi
 
-          echo "Logging into gh using provided PAT (token will not be printed)."
           echo "$CODESPACE_PAT" | gh auth login --with-token
-
-          echo "gh auth status:"; gh auth status
-
           CODESPACE_NAME=$(gh codespace list --repo "$REPO" --json name --jq '.[0].name' || echo "")
-          echo "CODESPACE_NAME=$CODESPACE_NAME"
-
           if [ -z "$CODESPACE_NAME" ]; then
-            echo "ERROR: No codespace found for $REPO; cannot set port visibility." >&2
+            echo "No codespace found for $REPO; cannot set port visibility." >&2
             gh codespace list --repo "$REPO" --json name || true
             exit 1
           fi
 
-          echo "Setting port 80 visibility to public for codespace: $CODESPACE_NAME"
-
           # Try gh api with retries
-          set +e
-          MAX_TRIES=3
-          TRIED=0
-          GH_OK=1
+          MAX_TRIES=3; TRIED=0; GH_OK=1
           while [ $TRIED -lt $MAX_TRIES ]; do
             TRIED=$((TRIED+1))
             echo "Attempt $TRIED: gh api PATCH..."
-            gh api -X PATCH /user/codespaces/"$CODESPACE_NAME"/ports/80 -f visibility=public > /tmp/ghresp.json 2>&1
+            gh api -X PATCH /user/codespaces/"$CODESPACE_NAME"/ports/80 -f visibility=public > /tmp/ghresp.json 2>&1 || true
             RC=$?
             echo "gh api exit code: $RC"
             if [ $RC -eq 0 ]; then
@@ -106,14 +88,12 @@ jobs:
           if [ $GH_OK -eq 0 ]; then
             echo "gh api succeeded on attempt $TRIED.";
             echo "Response:"; cat /tmp/ghresp.json || true
-            set -e
             exit 0
           fi
 
           # Fallback to curl if gh api consistently fails
           echo "gh api failed after $MAX_TRIES attempts; falling back to curl..."
           CURL_URL="https://api.github.com/user/codespaces/$CODESPACE_NAME/ports/80"
-          # Do not print token
           HTTP_STATUS=$(curl -s -o /tmp/curlresp.json -w "%{http_code}" -X PATCH \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: token $CODESPACE_PAT" \
@@ -121,7 +101,6 @@ jobs:
             "$CURL_URL" -d '{"visibility":"public"}' || echo "000")
           echo "curl HTTP status: $HTTP_STATUS"
           echo "curl response body:"; cat /tmp/curlresp.json || true
-          set -e
           if echo "$HTTP_STATUS" | grep -qE '^2'; then
             echo "Port visibility set to public via curl."
           else
