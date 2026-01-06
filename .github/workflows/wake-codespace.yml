@@ -14,104 +14,148 @@ jobs:
     steps:
       - name: Install GitHub CLI
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ca-certificates curl jq gnupg lsb-release
-          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-          sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          sudo apt-get update
-          sudo apt-get install -y gh
+          # 安装最新版 GitHub CLI
+          type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+          && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+          && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+          && sudo apt update \
+          && sudo apt install gh -y
           
-      - name: Check GitHub CLI version
+      - name: Verify GitHub CLI installation
         run: |
           echo "GitHub CLI version:"
           gh --version
+          echo ""
+          echo "Available commands:"
+          gh codespace --help
           
       - name: Authenticate with PAT
         env:
           CODESPACE_PAT: ${{ secrets.CODESPACE_PAT }}
         run: |
           if [ -z "$CODESPACE_PAT" ]; then
-            echo "CODESPACE_PAT secret is not set. Please add a PAT with 'codespaces' scope to repository secrets as 'CODESPACE_PAT'."
+            echo "ERROR: CODESPACE_PAT secret is not set."
+            echo "Please add a Personal Access Token with 'codespaces' scope to repository secrets as 'CODESPACE_PAT'."
             exit 1
           fi
-          echo "Authenticating with GitHub CLI..."
-          echo "$CODESPACE_PAT" | gh auth login --with-token
-          gh auth status
+          echo "Authenticating with GitHub..."
+          echo "$CODESPACE_PAT" | gh auth login --with-token --hostname github.com
+          echo "Authentication successful"
           
-      - name: Find and start/create codespace
-        run: |
-          set -x
-          REPO="${{ github.repository }}"
-          echo "Repository: $REPO"
-          
-          # 获取 codespace 名称
-          echo "Fetching codespace list..."
-          CODESPACE_NAME=$(gh codespace list --repo "$REPO" --json name --jq '.[0].name' 2>/dev/null || echo "")
-          
-          if [ -n "$CODESPACE_NAME" ]; then
-            echo "Found codespace: $CODESPACE_NAME"
-            echo "Starting codespace..."
-            # 正确的语法 - 不使用 -c 参数
-            gh codespace start "$CODESPACE_NAME"
-            echo "Codespace started successfully"
-          else
-            echo "No existing codespace found for $REPO."
-            echo "Attempting to create one..."
-            gh codespace create --repo "$REPO" --branch "master" --default-permissions || echo "Create failed or not permitted"
-          fi
-          
-      - name: Wait for codespace to be ready
-        run: |
-          echo "Waiting for codespace to be ready..."
-          sleep 15
-          
-      - name: Make port 80 public
+      - name: Check and wake codespace
         env:
           CODESPACE_PAT: ${{ secrets.CODESPACE_PAT }}
         run: |
-          set -x
           REPO="${{ github.repository }}"
+          echo "Processing repository: $REPO"
           
-          if [ -z "$CODESPACE_PAT" ]; then
-            echo "ERROR: CODESPACE_PAT is not set"
-            exit 1
+          # 获取 codespace 信息
+          echo "Getting codespace information..."
+          CODESPACE_INFO=$(gh codespace list --repo "$REPO" --json name,state,gitStatus 2>/dev/null || echo "[]")
+          
+          if [ "$CODESPACE_INFO" = "[]" ]; then
+            echo "No existing codespace found. Trying to create one..."
+            # 尝试创建 codespace
+            gh codespace create --repo "$REPO" --branch "master" --default-permissions || echo "Codespace creation failed or not permitted"
+            exit 0
           fi
           
-          echo "Authenticating..."
-          echo "$CODESPACE_PAT" | gh auth login --with-token
+          # 提取 codespace 名称
+          CODESPACE_NAME=$(echo "$CODESPACE_INFO" | jq -r '.[0].name // empty')
           
-          echo "Fetching codespace..."
+          if [ -z "$CODESPACE_NAME" ]; then
+            echo "Could not extract codespace name"
+            exit 0
+          fi
+          
+          echo "Found codespace: $CODESPACE_NAME"
+          
+          # 检查状态
+          CODESPACE_STATE=$(echo "$CODESPACE_INFO" | jq -r '.[0].state // empty')
+          echo "Current state: $CODESPACE_STATE"
+          
+          # 方法1: 使用 API 来启动 (如果状态不是 Available)
+          if [ "$CODESPACE_STATE" != "Available" ]; then
+            echo "Codespace is not available ($CODESPACE_STATE). Attempting to wake it..."
+            
+            # 使用 curl 调用 GitHub API 来启动 codespace
+            API_URL="https://api.github.com/user/codespaces/$CODESPACE_NAME/start"
+            echo "Calling API: $API_URL"
+            
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: token $CODESPACE_PAT" \
+              -H "Content-Type: application/json" \
+              "$API_URL" 2>/dev/null || echo "ERROR\n000")
+              
+            HTTP_STATUS=$(echo "$RESPONSE" | tail -n1)
+            RESPONSE_BODY=$(echo "$RESPONSE" | head -n -1)
+            
+            echo "HTTP Status: $HTTP_STATUS"
+            if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ] || [ "$HTTP_STATUS" = "202" ]; then
+              echo "✓ Codespace start requested successfully"
+              echo "Response: $RESPONSE_BODY"
+            else
+              echo "⚠ Could not start codespace via API (Status: $HTTP_STATUS)"
+              echo "Response: $RESPONSE_BODY"
+            fi
+          else
+            echo "✓ Codespace is already available"
+          fi
+          
+          # 等待一下让 codespace 启动
+          echo "Waiting for codespace to be ready..."
+          sleep 10
+          
+      - name: Set port visibility
+        env:
+          CODESPACE_PAT: ${{ secrets.CODESPACE_PAT }}
+        run: |
+          REPO="${{ github.repository }}"
+          
+          # 再次获取 codespace 名称
           CODESPACE_NAME=$(gh codespace list --repo "$REPO" --json name --jq '.[0].name' 2>/dev/null || echo "")
           
           if [ -z "$CODESPACE_NAME" ]; then
-            echo "No codespace found"
-            exit 1
+            echo "No codespace found, skipping port configuration"
+            exit 0
           fi
           
-          echo "Setting port 80 visibility for: $CODESPACE_NAME"
+          echo "Configuring port 80 visibility for: $CODESPACE_NAME"
           
-          # 使用 curl 方法设置端口可见性
-          CURL_URL="https://api.github.com/user/codespaces/$CODESPACE_NAME/ports/80"
-          echo "Making API call to: $CURL_URL"
+          # 设置端口 80 为公开
+          API_URL="https://api.github.com/user/codespaces/$CODESPACE_NAME/ports/80"
           
-          HTTP_STATUS=$(curl -s -o /tmp/curlresp.json -w "%{http_code}" -X PATCH \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: token $CODESPACE_PAT" \
-            -H "Content-Type: application/json" \
-            "$CURL_URL" -d '{"visibility":"public"}' || echo "000")
+          MAX_RETRIES=3
+          RETRY_COUNT=0
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            echo "Attempt $RETRY_COUNT to set port visibility..."
             
-          echo "HTTP Status: $HTTP_STATUS"
-          echo "Response:"
-          cat /tmp/curlresp.json || echo "No response body"
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X PATCH \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: token $CODESPACE_PAT" \
+              -H "Content-Type: application/json" \
+              "$API_URL" -d '{"visibility":"public"}' 2>/dev/null || echo "ERROR\n000")
+              
+            HTTP_STATUS=$(echo "$RESPONSE" | tail -n1)
+            
+            if [ "$HTTP_STATUS" = "200" ]; then
+              echo "✓ Port 80 set to public visibility"
+              break
+            else
+              echo "⚠ Attempt $RETRY_COUNT failed (Status: $HTTP_STATUS)"
+              if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                sleep 5
+              fi
+            fi
+          done
           
-          if echo "$HTTP_STATUS" | grep -qE '^2'; then
-            echo "✓ Port 80 visibility set to public"
-          else
-            echo "✗ Failed to set port visibility (HTTP $HTTP_STATUS)"
-            # 不退出，只是记录错误
-            echo "Continuing despite port visibility error..."
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "⚠ Could not set port visibility after $MAX_RETRIES attempts"
           fi
           
-      - name: Done
-        run: echo "✓ Wake attempt completed"
+      - name: Complete
+        run: echo "✅ Codespace wake-up process completed"
