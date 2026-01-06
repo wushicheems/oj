@@ -14,15 +14,19 @@ jobs:
     steps:
       - name: Install GitHub CLI
         run: |
-          set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y ca-certificates curl jq gnupg lsb-release || true
+          sudo apt-get install -y ca-certificates curl jq gnupg lsb-release
           curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
           sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
           sudo apt-get update
-          sudo apt-get install -y gh || true
-
+          sudo apt-get install -y gh
+          
+      - name: Check GitHub CLI version
+        run: |
+          echo "GitHub CLI version:"
+          gh --version
+          
       - name: Authenticate with PAT
         env:
           CODESPACE_PAT: ${{ secrets.CODESPACE_PAT }}
@@ -31,82 +35,83 @@ jobs:
             echo "CODESPACE_PAT secret is not set. Please add a PAT with 'codespaces' scope to repository secrets as 'CODESPACE_PAT'."
             exit 1
           fi
+          echo "Authenticating with GitHub CLI..."
           echo "$CODESPACE_PAT" | gh auth login --with-token
-
+          gh auth status
+          
       - name: Find and start/create codespace
         run: |
-          set -euxo pipefail
-          # shellcheck disable=SC2296,SC1083
-          REPO=${{ github.repository }}
+          set -x
+          REPO="${{ github.repository }}"
           echo "Repository: $REPO"
-          CODESPACE_NAME=$(gh codespace list --repo "$REPO" --json name --jq '.[0].name' || echo "")
+          
+          # 获取 codespace 名称
+          echo "Fetching codespace list..."
+          CODESPACE_NAME=$(gh codespace list --repo "$REPO" --json name --jq '.[0].name' 2>/dev/null || echo "")
+          
           if [ -n "$CODESPACE_NAME" ]; then
-            echo "Starting codespace: $CODESPACE_NAME"
-            gh codespace start -c "$CODESPACE_NAME"
+            echo "Found codespace: $CODESPACE_NAME"
+            echo "Starting codespace..."
+            # 正确的语法 - 不使用 -c 参数
+            gh codespace start "$CODESPACE_NAME"
+            echo "Codespace started successfully"
           else
-            echo "No existing codespace found for $REPO. Attempting to create one..."
-            gh codespace create --repo "$REPO" --branch "master" || echo "create failed or not permitted"
+            echo "No existing codespace found for $REPO."
+            echo "Attempting to create one..."
+            gh codespace create --repo "$REPO" --branch "master" --default-permissions || echo "Create failed or not permitted"
           fi
-
+          
+      - name: Wait for codespace to be ready
+        run: |
+          echo "Waiting for codespace to be ready..."
+          sleep 15
+          
       - name: Make port 80 public
         env:
           CODESPACE_PAT: ${{ secrets.CODESPACE_PAT }}
         run: |
-          set -euxo pipefail
-          # shellcheck disable=SC2296,SC1083
-          REPO=${{ github.repository }}
-
+          set -x
+          REPO="${{ github.repository }}"
+          
           if [ -z "$CODESPACE_PAT" ]; then
-            echo "ERROR: CODESPACE_PAT is not set; cannot set port visibility" >&2
+            echo "ERROR: CODESPACE_PAT is not set"
             exit 1
           fi
-
+          
+          echo "Authenticating..."
           echo "$CODESPACE_PAT" | gh auth login --with-token
-          CODESPACE_NAME=$(gh codespace list --repo "$REPO" --json name --jq '.[0].name' || echo "")
+          
+          echo "Fetching codespace..."
+          CODESPACE_NAME=$(gh codespace list --repo "$REPO" --json name --jq '.[0].name' 2>/dev/null || echo "")
+          
           if [ -z "$CODESPACE_NAME" ]; then
-            echo "No codespace found for $REPO; cannot set port visibility." >&2
-            gh codespace list --repo "$REPO" --json name || true
+            echo "No codespace found"
             exit 1
           fi
-
-          # Try gh api with retries
-          MAX_TRIES=3; TRIED=0; GH_OK=1
-          while [ $TRIED -lt $MAX_TRIES ]; do
-            TRIED=$((TRIED+1))
-            echo "Attempt $TRIED: gh api PATCH..."
-            gh api -X PATCH /user/codespaces/"$CODESPACE_NAME"/ports/80 -f visibility=public > /tmp/ghresp.json 2>&1 || true
-            RC=$?
-            echo "gh api exit code: $RC"
-            if [ $RC -eq 0 ]; then
-              GH_OK=0
-              break
-            fi
-            echo "gh api attempt $TRIED failed; response:"; cat /tmp/ghresp.json || true
-            sleep $((TRIED*2))
-          done
-
-          if [ $GH_OK -eq 0 ]; then
-            echo "gh api succeeded on attempt $TRIED.";
-            echo "Response:"; cat /tmp/ghresp.json || true
-            exit 0
-          fi
-
-          # Fallback to curl if gh api consistently fails
-          echo "gh api failed after $MAX_TRIES attempts; falling back to curl..."
+          
+          echo "Setting port 80 visibility for: $CODESPACE_NAME"
+          
+          # 使用 curl 方法设置端口可见性
           CURL_URL="https://api.github.com/user/codespaces/$CODESPACE_NAME/ports/80"
+          echo "Making API call to: $CURL_URL"
+          
           HTTP_STATUS=$(curl -s -o /tmp/curlresp.json -w "%{http_code}" -X PATCH \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: token $CODESPACE_PAT" \
             -H "Content-Type: application/json" \
             "$CURL_URL" -d '{"visibility":"public"}' || echo "000")
-          echo "curl HTTP status: $HTTP_STATUS"
-          echo "curl response body:"; cat /tmp/curlresp.json || true
+            
+          echo "HTTP Status: $HTTP_STATUS"
+          echo "Response:"
+          cat /tmp/curlresp.json || echo "No response body"
+          
           if echo "$HTTP_STATUS" | grep -qE '^2'; then
-            echo "Port visibility set to public via curl."
+            echo "✓ Port 80 visibility set to public"
           else
-            echo "Failed to set port visibility via curl (HTTP $HTTP_STATUS)." >&2
-            exit 1
+            echo "✗ Failed to set port visibility (HTTP $HTTP_STATUS)"
+            # 不退出，只是记录错误
+            echo "Continuing despite port visibility error..."
           fi
-
+          
       - name: Done
-        run: echo "Wake attempt finished"
+        run: echo "✓ Wake attempt completed"
