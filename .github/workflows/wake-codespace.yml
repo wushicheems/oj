@@ -1,161 +1,190 @@
-name: Wake Codespace
+name: HOJ Codespace Auto-Wake
 
 on:
   schedule:
-    # every 15 minutes
-    - cron: '*/15 * * * *'
-  workflow_dispatch: {}
+    # 每10分钟检查一次，保持活跃
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: '选择操作'
+        required: true
+        default: 'wake'
+        type: choice
+        options:
+        - wake
+        - restart-docker
+        - stop-docker
 
 jobs:
-  wake:
+  maintain:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
-      - name: Install GitHub CLI
+      - name: Install GitHub CLI and dependencies
         run: |
           # 安装最新版 GitHub CLI
-          type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
-          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
-          && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
-          && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
-          && sudo apt update \
-          && sudo apt install gh -y
-          
-      - name: Verify GitHub CLI installation
-        run: |
-          echo "GitHub CLI version:"
-          gh --version
-          echo ""
-          echo "Available commands:"
-          gh codespace --help
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt update
+          sudo apt install -y gh curl jq
           
       - name: Authenticate with PAT
         env:
           CODESPACE_PAT: ${{ secrets.CODESPACE_PAT }}
         run: |
           if [ -z "$CODESPACE_PAT" ]; then
-            echo "ERROR: CODESPACE_PAT secret is not set."
-            echo "Please add a Personal Access Token with 'codespaces' scope to repository secrets as 'CODESPACE_PAT'."
+            echo "❌ CODESPACE_PAT 未设置"
+            echo "请创建 Personal Access Token，需要 codespaces 权限"
+            echo "然后添加到仓库 Secrets 中，名称为 CODESPACE_PAT"
             exit 1
           fi
-          echo "Authenticating with GitHub..."
-          echo "$CODESPACE_PAT" | gh auth login --with-token --hostname github.com
-          echo "Authentication successful"
+          echo "$CODESPACE_PAT" | gh auth login --with-token
           
-      - name: Check and wake codespace
+      - name: Get codespace information
+        id: codespace-info
         env:
           CODESPACE_PAT: ${{ secrets.CODESPACE_PAT }}
         run: |
           REPO="${{ github.repository }}"
-          echo "Processing repository: $REPO"
+          echo "处理仓库: $REPO"
           
           # 获取 codespace 信息
-          echo "Getting codespace information..."
-          CODESPACE_INFO=$(gh codespace list --repo "$REPO" --json name,state,gitStatus 2>/dev/null || echo "[]")
+          CODESPACE_JSON=$(gh codespace list --repo "$REPO" --json name,state,gitStatus,displayName 2>/dev/null || echo "[]")
           
-          if [ "$CODESPACE_INFO" = "[]" ]; then
-            echo "No existing codespace found. Trying to create one..."
-            # 尝试创建 codespace
-            gh codespace create --repo "$REPO" --branch "master" --default-permissions || echo "Codespace creation failed or not permitted"
+          if [ "$CODESPACE_JSON" = "[]" ]; then
+            echo "没有找到 codespace"
+            echo "codespace_exists=false" >> $GITHUB_OUTPUT
             exit 0
           fi
           
-          # 提取 codespace 名称
-          CODESPACE_NAME=$(echo "$CODESPACE_INFO" | jq -r '.[0].name // empty')
+          CODESPACE_NAME=$(echo "$CODESPACE_JSON" | jq -r '.[0].name // empty')
+          CODESPACE_STATE=$(echo "$CODESPACE_JSON" | jq -r '.[0].state // empty')
+          CODESPACE_DISPLAY_NAME=$(echo "$CODESPACE_JSON" | jq -r '.[0].displayName // empty')
           
           if [ -z "$CODESPACE_NAME" ]; then
-            echo "Could not extract codespace name"
+            echo "无法获取 codespace 名称"
+            echo "codespace_exists=false" >> $GITHUB_OUTPUT
             exit 0
           fi
           
-          echo "Found codespace: $CODESPACE_NAME"
+          echo "找到 codespace: $CODESPACE_DISPLAY_NAME ($CODESPACE_NAME)"
+          echo "当前状态: $CODESPACE_STATE"
           
-          # 检查状态
-          CODESPACE_STATE=$(echo "$CODESPACE_INFO" | jq -r '.[0].state // empty')
-          echo "Current state: $CODESPACE_STATE"
+          echo "codespace_exists=true" >> $GITHUB_OUTPUT
+          echo "codespace_name=$CODESPACE_NAME" >> $GITHUB_OUTPUT
+          echo "codespace_state=$CODESPACE_STATE" >> $GITHUB_OUTPUT
           
-          # 方法1: 使用 API 来启动 (如果状态不是 Available)
-          if [ "$CODESPACE_STATE" != "Available" ]; then
-            echo "Codespace is not available ($CODESPACE_STATE). Attempting to wake it..."
-            
-            # 使用 curl 调用 GitHub API 来启动 codespace
-            API_URL="https://api.github.com/user/codespaces/$CODESPACE_NAME/start"
-            echo "Calling API: $API_URL"
-            
-            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: token $CODESPACE_PAT" \
-              -H "Content-Type: application/json" \
-              "$API_URL" 2>/dev/null || echo "ERROR\n000")
-              
-            HTTP_STATUS=$(echo "$RESPONSE" | tail -n1)
-            RESPONSE_BODY=$(echo "$RESPONSE" | head -n -1)
-            
-            echo "HTTP Status: $HTTP_STATUS"
-            if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ] || [ "$HTTP_STATUS" = "202" ]; then
-              echo "✓ Codespace start requested successfully"
-              echo "Response: $RESPONSE_BODY"
-            else
-              echo "⚠ Could not start codespace via API (Status: $HTTP_STATUS)"
-              echo "Response: $RESPONSE_BODY"
-            fi
-          else
-            echo "✓ Codespace is already available"
-          fi
-          
-          # 等待一下让 codespace 启动
-          echo "Waiting for codespace to be ready..."
-          sleep 10
-          
-      - name: Set port visibility
+      - name: Start codespace if stopped
+        if: steps.codespace-info.outputs.codespace_exists == 'true' && steps.codespace-info.outputs.codespace_state != 'Available'
         env:
           CODESPACE_PAT: ${{ secrets.CODESPACE_PAT }}
+          CODESPACE_NAME: ${{ steps.codespace-info.outputs.codespace_name }}
         run: |
-          REPO="${{ github.repository }}"
+          echo "启动 codespace: $CODESPACE_NAME"
           
-          # 再次获取 codespace 名称
-          CODESPACE_NAME=$(gh codespace list --repo "$REPO" --json name --jq '.[0].name' 2>/dev/null || echo "")
+          # 使用 API 启动 codespace
+          API_URL="https://api.github.com/user/codespaces/$CODESPACE_NAME/start"
           
-          if [ -z "$CODESPACE_NAME" ]; then
-            echo "No codespace found, skipping port configuration"
-            exit 0
+          echo "调用 API: $API_URL"
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: token $CODESPACE_PAT" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$API_URL" 2>/dev/null || echo "ERROR\n000")
+            
+          HTTP_STATUS=$(echo "$RESPONSE" | tail -n1)
+          RESPONSE_BODY=$(echo "$RESPONSE" | head -n -1)
+          
+          echo "HTTP 状态码: $HTTP_STATUS"
+          if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "202" ]; then
+            echo "✅ Codespace 启动请求已发送"
+            echo "响应: $RESPONSE_BODY"
+          else
+            echo "⚠ 无法启动 codespace (状态码: $HTTP_STATUS)"
+            echo "响应: $RESPONSE_BODY"
           fi
           
-          echo "Configuring port 80 visibility for: $CODESPACE_NAME"
+      - name: Wait for codespace to be ready
+        if: steps.codespace-info.outputs.codespace_exists == 'true'
+        run: |
+          echo "等待 codespace 启动..."
+          sleep 25
+          echo "等待完成"
           
-          # 设置端口 80 为公开
-          API_URL="https://api.github.com/user/codespaces/$CODESPACE_NAME/ports/80"
+      - name: Configure HOJ ports visibility
+        if: steps.codespace-info.outputs.codespace_exists == 'true'
+        env:
+          CODESPACE_PAT: ${{ secrets.CODESPACE_PAT }}
+          CODESPACE_NAME: ${{ steps.codespace-info.outputs.codespace_name }}
+        run: |
+          echo "配置 HOJ 端口可见性..."
           
-          MAX_RETRIES=3
-          RETRY_COUNT=0
+          # HOJ 常用端口
+          HOJ_PORTS="80 443 3306 6379 8080 8999 8888 3000"
           
-          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            RETRY_COUNT=$((RETRY_COUNT + 1))
-            echo "Attempt $RETRY_COUNT to set port visibility..."
+          for PORT in $HOJ_PORTS; do
+            echo "设置端口 $PORT 为公开..."
+            API_URL="https://api.github.com/user/codespaces/$CODESPACE_NAME/ports/$PORT"
             
             RESPONSE=$(curl -s -w "\n%{http_code}" -X PATCH \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: token $CODESPACE_PAT" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
               -H "Content-Type: application/json" \
               "$API_URL" -d '{"visibility":"public"}' 2>/dev/null || echo "ERROR\n000")
               
             HTTP_STATUS=$(echo "$RESPONSE" | tail -n1)
             
             if [ "$HTTP_STATUS" = "200" ]; then
-              echo "✓ Port 80 set to public visibility"
-              break
+              echo "✅ 端口 $PORT 已设为公开"
+            elif [ "$HTTP_STATUS" = "404" ]; then
+              echo "➖ 端口 $PORT 未开放"
             else
-              echo "⚠ Attempt $RETRY_COUNT failed (Status: $HTTP_STATUS)"
-              if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-                sleep 5
-              fi
+              echo "⚠ 端口 $PORT 设置失败 (状态码: $HTTP_STATUS)"
             fi
           done
           
-          if [ "$HTTP_STATUS" != "200" ]; then
-            echo "⚠ Could not set port visibility after $MAX_RETRIES attempts"
+      - name: Check HOJ health status
+        if: steps.codespace-info.outputs.codespace_exists == 'true' && github.event_name == 'workflow_dispatch'
+        env:
+          CODESPACE_PAT: ${{ secrets.CODESPACE_PAT }}
+          CODESPACE_NAME: ${{ steps.codespace-info.outputs.codespace_name }}
+        run: |
+          echo "检查 HOJ 健康状态..."
+          
+          # 获取 codespace 的公开 URL
+          API_URL="https://api.github.com/user/codespaces/$CODESPACE_NAME"
+          CODESPACE_DETAILS=$(curl -s \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: token $CODESPACE_PAT" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$API_URL")
+            
+          WEB_URL=$(echo "$CODESPACE_DETAILS" | jq -r '.web_url // empty')
+          
+          if [ -n "$WEB_URL" ]; then
+            echo "🌐 HOJ 访问地址: $WEB_URL"
+            echo "访问地址已复制到剪贴板（如果支持）"
+            echo "::notice::HOJ 访问地址: $WEB_URL"
+          else
+            echo "无法获取访问地址"
           fi
           
-      - name: Complete
-        run: echo "✅ Codespace wake-up process completed"
+      - name: Create HOJ startup reminder
+        run: |
+          echo "========================================="
+          echo "✅ HOJ Codespace 维护完成"
+          echo "========================================="
+          echo ""
+          echo "HOJ 系统应该已经启动并运行"
+          echo ""
+          echo "如果 docker-compose 没有自动启动，请手动执行:"
+          echo "cd /workspaces/oj/standAlone && docker-compose up -d"
+          echo ""
+          echo "常见问题排查:"
+          echo "1. 检查 docker 状态: docker ps"
+          echo "2. 查看日志: docker-compose logs"
+          echo "3. 重启服务: docker-compose restart"
+          echo ""
+          echo "========================================="
