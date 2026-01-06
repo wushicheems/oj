@@ -1,0 +1,38 @@
+{
+  "name": "HOJ Online Judge",
+  "image": "mcr.microsoft.com/devcontainers/universal:2",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+    "ghcr.io/devcontainers/features/node:1": {},
+    "ghcr.io/devcontainers/features/python:1": {}
+  },
+  "postCreateCommand": "cd /workspaces/oj/standAlone && docker-compose up -d",
+  "postStartCommand": "cd /workspaces/oj/standAlone && docker-compose up -d",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-azuretools.vscode-docker",
+        "ms-vscode-remote.remote-containers"
+      ]
+    }
+  },
+  "portsAttributes": {
+    "80": {
+      "label": "HOJ Web",
+      "onAutoForward": "openPreview"
+    },
+    "3306": {
+      "label": "MySQL",
+      "onAutoForward": "notify"
+    },
+    "6379": {
+      "label": "Redis",
+      "onAutoForward": "notify"
+    },
+    "8080": {
+      "label": "Backend",
+      "onAutoForward": "notify"
+    }
+  },
+  "forwardPorts": [80, 3306, 6379, 8080]
+}
